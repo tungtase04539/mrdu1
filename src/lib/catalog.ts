@@ -26,7 +26,10 @@ export type Product = {
   usage?: string;
   commitment?: string;
   imageUrl?: string;
+  gallery?: string[];
   featured?: boolean;
+  published?: boolean;
+  sortOrder?: number;
   stock?: number;
 };
 

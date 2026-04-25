@@ -1,14 +1,27 @@
 import { NextResponse } from "next/server";
 import type { Product } from "@/lib/catalog";
-import { validateAdminRequest } from "@/lib/admin-auth";
-import { hasSupabaseConfig, hasSupabaseWriteConfig, listCmsProducts, upsertCmsProduct } from "@/lib/supabase-rest";
+import { isAuthorised, validateAdminRequest } from "@/lib/admin-auth";
+import {
+  hasSupabaseConfig,
+  hasSupabaseWriteConfig,
+  listCmsProducts,
+  upsertCmsProduct
+} from "@/lib/supabase-rest";
 
-export async function GET() {
+export async function GET(request: Request) {
+  const admin = isAuthorised(request);
   try {
-    const data = await listCmsProducts();
-    return NextResponse.json({ configured: hasSupabaseConfig(), products: data });
+    const data = await listCmsProducts({ includeUnpublished: admin });
+    return NextResponse.json({
+      configured: hasSupabaseConfig(),
+      admin,
+      products: data
+    });
   } catch {
-    return NextResponse.json({ configured: hasSupabaseConfig(), error: "Không tải được sản phẩm." }, { status: 500 });
+    return NextResponse.json(
+      { configured: hasSupabaseConfig(), admin, error: "Không tải được sản phẩm." },
+      { status: 500 }
+    );
   }
 }
 
@@ -28,7 +41,7 @@ export async function POST(request: Request) {
   try {
     const product = await readProductRequest(request);
     if (!product.id) {
-      const products = await listCmsProducts();
+      const products = await listCmsProducts({ includeUnpublished: true });
       if (products.some((item) => item.categorySlug === product.categorySlug && item.slug === product.slug)) {
         return NextResponse.json({ error: "Slug này đã tồn tại trong danh mục." }, { status: 409 });
       }
@@ -41,8 +54,16 @@ export async function POST(request: Request) {
     const saved = await upsertCmsProduct({
       ...product,
       featured: Boolean(product.featured),
+      published: product.published === false ? false : true,
+      sortOrder:
+        product.sortOrder === undefined || product.sortOrder === null
+          ? undefined
+          : Number(product.sortOrder),
       stock: product.stock === undefined ? undefined : Number(product.stock),
-      price: product.price === undefined ? undefined : Number(product.price)
+      price: product.price === undefined ? undefined : Number(product.price),
+      gallery: Array.isArray(product.gallery)
+        ? product.gallery.filter((url) => typeof url === "string" && url.trim()).slice(0, 6)
+        : undefined
     });
 
     return NextResponse.json(saved);
@@ -75,6 +96,10 @@ function validateProduct(product: Product) {
   if (!product.description?.trim()) return "Mô tả chi tiết là bắt buộc.";
   if (product.price !== undefined && (!Number.isFinite(Number(product.price)) || Number(product.price) < 0)) return "Giá phải là số không âm.";
   if (product.stock !== undefined && (!Number.isInteger(Number(product.stock)) || Number(product.stock) < 0)) return "Tồn kho phải là số nguyên không âm.";
+  if (product.sortOrder !== undefined && product.sortOrder !== null && (!Number.isFinite(Number(product.sortOrder)) || Number(product.sortOrder) < 0)) {
+    return "Sort order phải là số không âm.";
+  }
+  if (product.gallery && !Array.isArray(product.gallery)) return "Gallery phải là mảng URL.";
   return null;
 }
 

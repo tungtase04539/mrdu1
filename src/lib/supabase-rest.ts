@@ -1,8 +1,11 @@
-import { categories, products, type Product } from "@/lib/catalog";
+import { categories, products, type Category, type Product } from "@/lib/catalog";
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const SUPABASE_READ_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+export type LeadStatus = "new" | "contacted" | "converted" | "archived";
+export const LEAD_STATUSES: LeadStatus[] = ["new", "contacted", "converted", "archived"];
 
 export type Lead = {
   name: string;
@@ -10,6 +13,62 @@ export type Lead = {
   email?: string;
   interest?: string;
   message?: string;
+};
+
+export type LeadRecord = Lead & {
+  id: string;
+  status: LeadStatus;
+  note?: string | null;
+  handled_at?: string | null;
+  handled_by?: string | null;
+  created_at: string;
+};
+
+export type CategoryRecord = {
+  id: string;
+  slug: string;
+  name: string;
+  short?: string | null;
+  subtitle?: string | null;
+  tagline?: string | null;
+  description?: string | null;
+  accent?: string | null;
+  hero_image?: string | null;
+  knowledge?: Category["education"] | null;
+  sort_order?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type SubcategoryRecord = {
+  id: string;
+  category_id: string;
+  slug: string;
+  name: string;
+  sort_order?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type AdminStats = {
+  products: {
+    total: number;
+    published: number;
+    featured: number;
+    lowStock: number;
+    perCategory: { slug: string; name: string; count: number }[];
+  };
+  leads: {
+    total: number;
+    new: number;
+    contacted: number;
+    converted: number;
+    archived: number;
+    lastCreatedAt: string | null;
+  };
+  categories: number;
+  subcategories: number;
+  configured: boolean;
 };
 
 type CategoryRow = {
@@ -67,12 +126,15 @@ export function hasSupabaseWriteConfig() {
   return Boolean(SUPABASE_URL && SUPABASE_SERVICE_KEY);
 }
 
-export async function listCmsProducts(): Promise<Product[]> {
+export async function listCmsProducts(options?: { includeUnpublished?: boolean }): Promise<Product[]> {
   if (!hasSupabaseConfig()) return products;
 
   try {
+    const query = options?.includeUnpublished
+      ? "/rest/v1/products?select=*&order=sort_order.asc,name.asc"
+      : "/rest/v1/products?select=*&is_published=eq.true&order=sort_order.asc,name.asc";
     const [response, lookup] = await Promise.all([
-      supabaseFetch("/rest/v1/products?select=*&is_published=eq.true&order=sort_order.asc,name.asc", {
+      supabaseFetch(query, {
         cache: "no-store",
         signal: AbortSignal.timeout(10_000)
       }),
@@ -145,12 +207,295 @@ export async function createLead(lead: Lead) {
   const response = await supabaseFetch("/rest/v1/leads", {
     method: "POST",
     headers: { Prefer: "return=minimal" },
-    body: JSON.stringify(lead)
+    body: JSON.stringify({ ...lead, status: "new" })
   }, SUPABASE_SERVICE_KEY);
 
   if (!response.ok) {
     throw new Error(await response.text());
   }
+}
+
+/* ===================== LEADS CRUD ===================== */
+
+export async function listLeads(filter?: { status?: LeadStatus | "all"; q?: string; limit?: number }): Promise<LeadRecord[]> {
+  if (!hasSupabaseWriteConfig()) return [];
+  const params = new URLSearchParams({ select: "*", order: "created_at.desc" });
+  if (filter?.status && filter.status !== "all") {
+    params.set("status", `eq.${filter.status}`);
+  }
+  if (filter?.limit) params.set("limit", String(Math.min(Math.max(1, filter.limit), 500)));
+  try {
+    const response = await supabaseFetch(`/rest/v1/leads?${params.toString()}`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(10_000)
+    }, SUPABASE_SERVICE_KEY);
+    if (!response.ok) return [];
+    const rows = (await response.json()) as LeadRecord[];
+    const cleaned = rows.map(normalizeLead);
+    if (!filter?.q) return cleaned;
+    const needle = filter.q.trim().toLowerCase();
+    if (!needle) return cleaned;
+    return cleaned.filter((lead) =>
+      `${lead.name} ${lead.phone} ${lead.email ?? ""} ${lead.interest ?? ""} ${lead.message ?? ""}`
+        .toLowerCase()
+        .includes(needle)
+    );
+  } catch {
+    return [];
+  }
+}
+
+export async function updateLead(id: string, patch: Partial<Pick<LeadRecord, "status" | "note" | "handled_by">>) {
+  if (!hasSupabaseWriteConfig()) {
+    throw new Error("Thiếu SUPABASE_SERVICE_ROLE_KEY để cập nhật lead.");
+  }
+  if (!isUuid(id)) {
+    throw new Error("Lead id không hợp lệ.");
+  }
+  if (patch.status && !LEAD_STATUSES.includes(patch.status)) {
+    throw new Error("Trạng thái lead không hợp lệ.");
+  }
+  const body: Record<string, unknown> = {};
+  if (patch.status !== undefined) body.status = patch.status;
+  if (patch.note !== undefined) body.note = patch.note;
+  if (patch.handled_by !== undefined) body.handled_by = patch.handled_by;
+  if (patch.status && patch.status !== "new") body.handled_at = new Date().toISOString();
+  if (patch.status === "new") body.handled_at = null;
+
+  const response = await supabaseFetch(`/rest/v1/leads?id=eq.${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify(body)
+  }, SUPABASE_SERVICE_KEY);
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const rows = (await response.json()) as LeadRecord[];
+  if (!rows.length) throw new Error("Không tìm thấy lead.");
+  return normalizeLead(rows[0]);
+}
+
+export async function deleteLead(id: string) {
+  if (!hasSupabaseWriteConfig()) {
+    throw new Error("Thiếu SUPABASE_SERVICE_ROLE_KEY để xoá lead.");
+  }
+  if (!isUuid(id)) {
+    throw new Error("Lead id không hợp lệ.");
+  }
+  const response = await supabaseFetch(`/rest/v1/leads?id=eq.${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Prefer: "return=representation" }
+  }, SUPABASE_SERVICE_KEY);
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  const rows = (await response.json()) as LeadRecord[];
+  if (!rows.length) throw new Error("Không tìm thấy lead.");
+}
+
+function normalizeLead(row: LeadRecord): LeadRecord {
+  return {
+    ...row,
+    status: (LEAD_STATUSES.includes(row.status) ? row.status : "new") as LeadStatus,
+    note: row.note ?? null,
+    handled_at: row.handled_at ?? null,
+    handled_by: row.handled_by ?? null
+  };
+}
+
+/* ===================== CATEGORIES CRUD ===================== */
+
+export async function listCategoriesFromCms(): Promise<CategoryRecord[]> {
+  if (!hasSupabaseConfig()) return [];
+  try {
+    const response = await supabaseFetch("/rest/v1/categories?select=*&order=sort_order.asc,name.asc", {
+      cache: "no-store",
+      signal: AbortSignal.timeout(10_000)
+    });
+    if (!response.ok) return [];
+    return (await response.json()) as CategoryRecord[];
+  } catch {
+    return [];
+  }
+}
+
+type CategoryInput = {
+  id?: string;
+  slug: string;
+  name: string;
+  short?: string;
+  subtitle?: string;
+  tagline?: string;
+  description?: string;
+  accent?: string;
+  hero_image?: string;
+  knowledge?: Category["education"];
+  sort_order?: number;
+};
+
+export async function upsertCategory(input: CategoryInput) {
+  if (!hasSupabaseWriteConfig()) {
+    throw new Error("Thiếu SUPABASE_SERVICE_ROLE_KEY.");
+  }
+  if (!input.slug || !isValidSlug(input.slug)) throw new Error("Slug danh mục không hợp lệ.");
+  if (!input.name?.trim()) throw new Error("Tên danh mục là bắt buộc.");
+
+  const body: Record<string, unknown> = {
+    slug: input.slug,
+    name: input.name.trim(),
+    short: input.short ?? null,
+    subtitle: input.subtitle ?? null,
+    tagline: input.tagline ?? null,
+    description: input.description ?? null,
+    accent: input.accent ?? null,
+    hero_image: input.hero_image ?? null,
+    sort_order: input.sort_order ?? 100,
+    updated_at: new Date().toISOString()
+  };
+  if (input.knowledge !== undefined) body.knowledge = input.knowledge;
+  if (input.id && isUuid(input.id)) body.id = input.id;
+
+  const response = await supabaseFetch("/rest/v1/categories", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(body)
+  }, SUPABASE_SERVICE_KEY);
+  if (!response.ok) throw new Error(await response.text());
+  const [row] = (await response.json()) as CategoryRecord[];
+  return row;
+}
+
+export async function deleteCategory(id: string) {
+  if (!hasSupabaseWriteConfig()) {
+    throw new Error("Thiếu SUPABASE_SERVICE_ROLE_KEY.");
+  }
+  if (!isUuid(id)) throw new Error("Category id không hợp lệ.");
+  const response = await supabaseFetch(`/rest/v1/categories?id=eq.${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Prefer: "return=representation" }
+  }, SUPABASE_SERVICE_KEY);
+  if (!response.ok) throw new Error(await response.text());
+  const rows = (await response.json()) as CategoryRecord[];
+  if (!rows.length) throw new Error("Không tìm thấy danh mục.");
+}
+
+/* ===================== SUBCATEGORIES CRUD ===================== */
+
+export async function listSubcategoriesFromCms(): Promise<SubcategoryRecord[]> {
+  if (!hasSupabaseConfig()) return [];
+  try {
+    const response = await supabaseFetch(
+      "/rest/v1/subcategories?select=*&order=category_id.asc,sort_order.asc,name.asc",
+      { cache: "no-store", signal: AbortSignal.timeout(10_000) }
+    );
+    if (!response.ok) return [];
+    return (await response.json()) as SubcategoryRecord[];
+  } catch {
+    return [];
+  }
+}
+
+type SubcategoryInput = {
+  id?: string;
+  category_id: string;
+  slug: string;
+  name: string;
+  sort_order?: number;
+};
+
+export async function upsertSubcategory(input: SubcategoryInput) {
+  if (!hasSupabaseWriteConfig()) {
+    throw new Error("Thiếu SUPABASE_SERVICE_ROLE_KEY.");
+  }
+  if (!isUuid(input.category_id)) throw new Error("category_id không hợp lệ.");
+  if (!input.slug || !isValidSlug(input.slug)) throw new Error("Slug danh mục con không hợp lệ.");
+  if (!input.name?.trim()) throw new Error("Tên danh mục con là bắt buộc.");
+
+  const body: Record<string, unknown> = {
+    category_id: input.category_id,
+    slug: input.slug,
+    name: input.name.trim(),
+    sort_order: input.sort_order ?? 100,
+    updated_at: new Date().toISOString()
+  };
+  if (input.id && isUuid(input.id)) body.id = input.id;
+
+  const response = await supabaseFetch("/rest/v1/subcategories", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(body)
+  }, SUPABASE_SERVICE_KEY);
+  if (!response.ok) throw new Error(await response.text());
+  const [row] = (await response.json()) as SubcategoryRecord[];
+  return row;
+}
+
+export async function deleteSubcategory(id: string) {
+  if (!hasSupabaseWriteConfig()) {
+    throw new Error("Thiếu SUPABASE_SERVICE_ROLE_KEY.");
+  }
+  if (!isUuid(id)) throw new Error("Subcategory id không hợp lệ.");
+  const response = await supabaseFetch(`/rest/v1/subcategories?id=eq.${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: { Prefer: "return=representation" }
+  }, SUPABASE_SERVICE_KEY);
+  if (!response.ok) throw new Error(await response.text());
+  const rows = (await response.json()) as SubcategoryRecord[];
+  if (!rows.length) throw new Error("Không tìm thấy danh mục con.");
+}
+
+/* ===================== ADMIN STATS ===================== */
+
+export async function getAdminStats(): Promise<AdminStats> {
+  const configured = hasSupabaseConfig();
+  const [allProducts, leadRows, categoryRows, subcategoryRows] = await Promise.all([
+    listCmsProducts(),
+    hasSupabaseWriteConfig() ? listLeads({ limit: 500 }) : Promise.resolve([] as LeadRecord[]),
+    listCategoriesFromCms(),
+    listSubcategoriesFromCms()
+  ]);
+
+  const perCategoryMap = new Map<string, { slug: string; name: string; count: number }>();
+  for (const category of categories) {
+    perCategoryMap.set(category.slug, { slug: category.slug, name: category.title, count: 0 });
+  }
+  for (const row of categoryRows) {
+    if (!perCategoryMap.has(row.slug)) {
+      perCategoryMap.set(row.slug, { slug: row.slug, name: row.name, count: 0 });
+    }
+  }
+  for (const product of allProducts) {
+    const bucket = perCategoryMap.get(product.categorySlug);
+    if (bucket) bucket.count += 1;
+  }
+
+  const leadCounts = { new: 0, contacted: 0, converted: 0, archived: 0 };
+  let lastLead: string | null = null;
+  for (const lead of leadRows) {
+    leadCounts[lead.status] = (leadCounts[lead.status] ?? 0) + 1;
+    if (!lastLead || (lead.created_at && lead.created_at > lastLead)) lastLead = lead.created_at;
+  }
+
+  return {
+    products: {
+      total: allProducts.length,
+      published: allProducts.length,
+      featured: allProducts.filter((item) => item.featured).length,
+      lowStock: allProducts.filter((item) => typeof item.stock === "number" && item.stock <= 10).length,
+      perCategory: Array.from(perCategoryMap.values())
+    },
+    leads: {
+      total: leadRows.length,
+      new: leadCounts.new,
+      contacted: leadCounts.contacted,
+      converted: leadCounts.converted,
+      archived: leadCounts.archived,
+      lastCreatedAt: lastLead
+    },
+    categories: Math.max(categoryRows.length, categories.length),
+    subcategories: subcategoryRows.length,
+    configured
+  };
 }
 
 function supabaseFetch(path: string, init: RequestInit = {}, key = SUPABASE_READ_KEY) {
@@ -203,7 +548,10 @@ function fromRow(row: ProductRow, lookup: CatalogLookup): Product | null {
     usage: normalizeRichText(row.usage),
     commitment: row.commitment ?? "Cam kết chính hãng, tư vấn chuyên sâu, giao hàng toàn quốc và đổi trả theo chính sách.",
     imageUrl: row.image_url ?? row.image ?? row.gallery?.[0] ?? undefined,
+    gallery: Array.isArray(row.gallery) ? row.gallery.filter(Boolean) : undefined,
     featured: row.featured ?? row.is_featured ?? false,
+    published: row.is_published ?? true,
+    sortOrder: row.sort_order,
     stock: row.stock
   };
 }
@@ -228,13 +576,19 @@ function toRow(product: Product, lookup: CatalogLookup): ProductRow {
     ingredients: splitLines(product.ingredients),
     usage: splitLines(product.usage),
     image: product.imageUrl,
+    gallery: Array.isArray(product.gallery) ? product.gallery.filter(Boolean) : undefined,
     price: product.price,
     stock: product.stock,
     commitment: product.commitment,
     badge: product.badge,
     is_featured: product.featured,
-    is_published: true,
-    sort_order: product.featured ? 0 : 100
+    is_published: product.published ?? true,
+    sort_order:
+      typeof product.sortOrder === "number"
+        ? product.sortOrder
+        : product.featured
+        ? 0
+        : 100
   };
 }
 

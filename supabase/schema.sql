@@ -81,8 +81,31 @@ create table if not exists public.leads (
   email text,
   interest text,
   message text,
+  status text default 'new',
+  note text,
+  handled_at timestamptz,
+  handled_by text,
   created_at timestamptz default now()
 );
+
+alter table public.leads
+  add column if not exists status text default 'new',
+  add column if not exists note text,
+  add column if not exists handled_at timestamptz,
+  add column if not exists handled_by text;
+
+update public.leads set status = 'new' where status is null;
+
+do $$
+begin
+  if not exists (select 1 from pg_constraint where conname = 'leads_status_valid') then
+    alter table public.leads
+      add constraint leads_status_valid check (status in ('new', 'contacted', 'converted', 'archived'));
+  end if;
+end $$;
+
+create index if not exists idx_leads_status_created
+  on public.leads(status, created_at desc);
 
 alter table public.categories enable row level security;
 alter table public.subcategories enable row level security;
