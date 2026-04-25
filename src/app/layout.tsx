@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Cormorant_Garamond, Inter } from "next/font/google";
+import { Fraunces, Inter } from "next/font/google";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteHeader } from "@/components/site-header";
 import { siteUrl } from "@/lib/site";
@@ -9,14 +9,15 @@ const sans = Inter({
   subsets: ["latin", "vietnamese"],
   display: "swap",
   variable: "--font-sans-next",
-  weight: ["400", "500", "600", "700"]
+  weight: ["300", "400", "500", "600"]
 });
 
-const serif = Cormorant_Garamond({
+const serif = Fraunces({
   subsets: ["latin", "vietnamese"],
   display: "swap",
   variable: "--font-serif-next",
-  weight: ["400", "500", "600", "700"]
+  weight: ["300", "400", "500"],
+  style: ["normal", "italic"]
 });
 
 export const metadata: Metadata = {

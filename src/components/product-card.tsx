@@ -12,10 +12,11 @@ export function ProductCard({ product }: { product: Product }) {
       aria-label={`Xem chi tiết ${product.title}`}
     >
       <div className="product-media">
-        <div className="product-badges">
-          {product.badge ? <span>{product.badge}</span> : null}
-          {product.featured ? <span>Nổi bật</span> : null}
-        </div>
+        {product.badge || product.featured ? (
+          <div className="product-badges">
+            <span>{product.badge ?? "Nổi bật"}</span>
+          </div>
+        ) : null}
         {product.imageUrl ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img src={product.imageUrl} alt={product.title} loading="lazy" />
